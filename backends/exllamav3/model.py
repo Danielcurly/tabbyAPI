@@ -14,6 +14,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Union,
 )
 from exllamav3.constants import PAGE_SIZE
 from exllamav3 import (
@@ -191,7 +192,7 @@ class ExllamaV3Container:
     gpu_split_auto: bool = True
     draft_gpu_split: Optional[List[float]] = None
     equal_split_proportions: Optional[List[float]] = None
-    equal_split_margin_mb: int = 1024
+    equal_split_margin_mb: Union[int, List[int]] = 1024
     equal_split_auto_context: bool = False
     equal_split_stress_test: bool = True
     autosplit_reserve: Optional[List[float]]
@@ -1109,7 +1110,7 @@ class ExllamaV3Container:
             if tokens <= 0:
                 raise RuntimeError(
                     "Equal split: the model does not fit with "
-                    f"{self.equal_split_margin_mb} MB free on every GPU, even at the "
+                    f"its margin ({self.equal_split_margin_mb} MB) free on every GPU, even at the "
                     "smallest context."
                 )
             if tokens < self.cache_size:

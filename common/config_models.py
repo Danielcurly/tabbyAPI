@@ -294,10 +294,11 @@ class ModelConfig(BaseConfigModel):
             "0 excludes a GPU. Replaces gpu_split_auto and autosplit_reserve."
         ),
     )
-    equal_split_margin_mb: Optional[int] = Field(
+    equal_split_margin_mb: Optional[Union[int, List[int]]] = Field(
         None,
         description=(
-            "Free VRAM every GPU must keep with the equal split (default: 1024).\n"
+            "Free VRAM every GPU must keep with the equal split, in MB (default: 1024).\n"
+            "One number applies to every GPU; a list gives one value per GPU.\n"
             "Checked against the memory measured when loading and by the stress test."
         ),
     )

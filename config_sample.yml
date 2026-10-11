@@ -157,6 +157,7 @@ model:
   #equal_split_proportions: [1, 1]
 
   # Free VRAM every GPU keeps with the equal split, in MB (default: 1024).
+  # One number applies to every GPU; a list gives one value per GPU, e.g. [1024, 2048, 1024, 1024].
   #equal_split_margin_mb: 1024
 
   # Largest context the equal split can place with its margin (default: false).
