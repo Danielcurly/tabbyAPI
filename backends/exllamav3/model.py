@@ -189,6 +189,7 @@ class ExllamaV3Container:
     gpu_split: Optional[List[float]] = None
     gpu_split_auto: bool = True
     draft_gpu_split: Optional[List[float]] = None
+    equal_split_proportions: Optional[List[float]] = None
     autosplit_reserve: Optional[List[float]]
     use_tp: bool = False
     tp_backend: str = "native"
@@ -411,6 +412,22 @@ class ExllamaV3Container:
             elif gpu_split_auto and not self.use_tp:
                 # Otherwise fallback to autosplit settings
                 self.gpu_split_auto = gpu_split_auto
+
+            # Equal split: layer split by the given per-GPU proportions, computed
+            # up front by exllamav3. Replaces autosplit and its reserve
+            equal_split_proportions = kwargs.get("equal_split_proportions")
+            if equal_split_proportions:
+                if self.use_tp or self.gpu_split:
+                    xlogger.warning(
+                        "equal_split_proportions is ignored with tensor_parallel or gpu_split."
+                    )
+                else:
+                    self.equal_split_proportions = equal_split_proportions
+                    gpu_device_list = [
+                        device_idx
+                        for device_idx, share in enumerate(equal_split_proportions)
+                        if share > 0
+                    ]
 
         # A manual split states how much of each GPU to use, and exllamav3 takes
         # either a reserve or a split, so the reserve is dropped for that model
@@ -1029,6 +1046,8 @@ class ExllamaV3Container:
         # however many devices are visible
         if self.use_tp:
             split_mode = "tensor parallel"
+        elif self.equal_split_proportions:
+            split_mode = f"equal split {self.equal_split_proportions}"
         elif self.gpu_split:
             split_mode = "manual GPU split"
         elif torch.cuda.device_count() == 1:
@@ -1038,14 +1057,22 @@ class ExllamaV3Container:
 
         xlogger.info(f"Loading model {self.model_dir} ({split_mode})")
 
+        # The equal split computes its own per-GPU budget, so no reserve is passed
+        split_kwargs = {}
+        if self.equal_split_proportions:
+            split_kwargs["equal_split_proportions"] = self.equal_split_proportions
+
         for value in self.model.load_gen(
             tensor_p=self.use_tp,
             tp_backend=self.tp_backend,
-            reserve_per_device=None if self.gpu_split else self.autosplit_reserve,
+            reserve_per_device=(
+                None if (self.gpu_split or self.equal_split_proportions) else self.autosplit_reserve
+            ),
             use_per_device=self.gpu_split,
             callback=progress_callback,
             max_chunk_size=self.chunk_size,
             max_batch_size=self.max_batch_size,
+            **split_kwargs,
         ):
             if value:
                 yield value
