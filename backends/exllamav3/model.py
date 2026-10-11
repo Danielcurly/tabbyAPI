@@ -427,6 +427,18 @@ class ExllamaV3Container:
                         "equal_split_proportions is ignored with tensor_parallel or gpu_split."
                     )
                 else:
+                    beyond = [
+                        device_idx
+                        for device_idx, share in enumerate(equal_split_proportions)
+                        if share > 0 and device_idx >= gpu_count
+                    ]
+                    if beyond:
+                        raise ValueError(
+                            f"equal_split_proportions lists {len(equal_split_proportions)} "
+                            f"GPUs but only {gpu_count} are visible (GPU index "
+                            f"{', '.join(str(i) for i in beyond)} missing). Give one value "
+                            "per visible GPU, or 0 for the ones to leave out."
+                        )
                     self.equal_split_proportions = equal_split_proportions
                     gpu_device_list = [
                         device_idx
@@ -958,6 +970,7 @@ class ExllamaV3Container:
             load_start = time.perf_counter()
             attempt = 0
             while True:
+                self.load_attempt = attempt
                 try:
                     generator = self.load_model_sync(progress_callback)
                     async for value in iterate_in_threadpool(generator):
@@ -982,6 +995,8 @@ class ExllamaV3Container:
                     if not self.equal_split_auto_context or attempt >= 3:
                         raise
                     new_size = e.suggested_context(self.cache_size)
+                    for line in e.report:
+                        print(line)
                     xlogger.warning(
                         f"Equal split: {str(e).splitlines()[0]}. Reloading with "
                         f"{new_size:,} tokens of context instead of {self.cache_size:,}."
