@@ -232,11 +232,14 @@ async def load_model_gen(model_path: pathlib.Path, **kwargs):
                 index = 0
                 seen_attempt = 0
                 async for module, modules in load_status:
-                    # An equal split retry reloads every component from the start
+                    # An equal split retry loads components again, from the start or
+                    # from the one the container names
                     attempt = getattr(new_container, "load_attempt", 0)
                     if attempt != seen_attempt:
                         seen_attempt = attempt
-                        index = 0
+                        rewind = getattr(new_container, "load_rewind", None)
+                        types = [t.value for t in model_type]
+                        index = types.index(rewind) if rewind in types else 0
                         progress.start()
                     current_model_type = model_type[index].value
                     if module == 0:

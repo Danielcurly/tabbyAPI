@@ -970,7 +970,7 @@ class ExllamaV3Container:
             load_start = time.perf_counter()
             attempt = 0
             while True:
-                self.load_attempt = attempt
+                self.load_restart()
                 try:
                     generator = self.load_model_sync(progress_callback)
                     async for value in iterate_in_threadpool(generator):
@@ -1191,6 +1191,7 @@ class ExllamaV3Container:
         torch.cuda.empty_cache()
         self._equal_split_new_caches(cache_size)
         if self.use_draft_model:
+            self.load_restart("draft")
             for value in self.draft_model.load_gen(
                 reserve_per_device=(
                     None if (self.gpu_split or self.draft_gpu_split) else self.autosplit_reserve
@@ -1200,6 +1201,14 @@ class ExllamaV3Container:
             ):
                 if value:
                     yield value
+
+    def load_restart(self, component: Optional[str] = None):
+        """
+        Tell the progress display that loading starts over, from the first component
+        or from the named one ("draft", ...), e.g. after an equal split retry
+        """
+        self.load_attempt = getattr(self, "load_attempt", 0) + 1
+        self.load_rewind = component
 
     def equal_split_reset_sync(self, cache_size: int):
         """Unload everything after a failed headroom check and size the caches anew"""
