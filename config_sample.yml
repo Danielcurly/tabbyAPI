@@ -160,6 +160,10 @@ model:
   # One number applies to every GPU; a list gives one value per GPU, e.g. [1024, 2048, 1024, 1024].
   #equal_split_margin_mb: 1024
 
+  # Runtime overhead per GPU the equal split adds to its estimate, in MB (default: 192).
+  # Raise it if the first automatic context fails the stress test and has to reload.
+  #equal_split_overhead_mb: 192
+
   # Largest context the equal split can place with its margin (default: false).
   # max_seq_len, if set, is the upper bound. Also: max_seq_len: auto in tabby_config.yml.
   #equal_split_auto_context: false

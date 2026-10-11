@@ -302,6 +302,16 @@ class ModelConfig(BaseConfigModel):
             "Checked against the memory measured when loading and by the stress test."
         ),
     )
+    equal_split_overhead_mb: Optional[Union[int, List[int]]] = Field(
+        None,
+        description=(
+            "Runtime overhead charged to every GPU that holds layers with the equal\n"
+            "split, in MB (default: the engine's calibrated value, 192). Covers what the\n"
+            "estimate misses (load-time buffers, kernels and workspaces after warmup);\n"
+            "raise it if the first automatic context fails the stress test.\n"
+            "One number applies to every GPU; a list gives one value per GPU."
+        ),
+    )
     equal_split_auto_context: Optional[bool] = Field(
         None,
         description=(

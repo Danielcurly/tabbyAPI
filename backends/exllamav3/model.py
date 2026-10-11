@@ -193,6 +193,7 @@ class ExllamaV3Container:
     draft_gpu_split: Optional[List[float]] = None
     equal_split_proportions: Optional[List[float]] = None
     equal_split_margin_mb: Union[int, List[int]] = 1024
+    equal_split_overhead_mb: Optional[Union[int, List[int]]] = None
     equal_split_auto_context: bool = False
     equal_split_stress_test: bool = True
     autosplit_reserve: Optional[List[float]]
@@ -451,6 +452,8 @@ class ExllamaV3Container:
                     self.equal_split_stress_test = unwrap(
                         kwargs.get("equal_split_stress_test"), True
                     )
+                    # None = the engine's calibrated default
+                    self.equal_split_overhead_mb = kwargs.get("equal_split_overhead_mb")
 
         # Automatic context: the largest cache the equal split can place with its
         # margin. Requested with max_seq_len/cache_size "auto" or
@@ -1020,6 +1023,20 @@ class ExllamaV3Container:
             async with self.load_condition:
                 self.load_condition.notify_all()
 
+    def draft_window(self) -> int:
+        """
+        Draft tokens per speculative step the generator will run: draft_num_tokens,
+        else the draft model's own default (DFlash: its block size - 1, MTP: 4),
+        4 for n-gram drafting, 0 without drafting
+        """
+        if self.use_draft_model:
+            return unwrap(
+                self.draft_num_tokens, self.draft_model.caps.get("default_draft_size", 4)
+            )
+        if self.ngram_match_min:
+            return unwrap(self.draft_num_tokens, 4)
+        return 0
+
     async def warmup_gen(self):
         """
         Run exllamav3's warmup on the loaded model in a worker thread, yielding
@@ -1038,10 +1055,7 @@ class ExllamaV3Container:
 
         # Match the decode step lengths the generator will run: single tokens,
         # or draft windows plus the verified token when drafting is on
-        draft_tokens = 0
-        if self.use_draft_model or self.ngram_match_min:
-            draft_tokens = unwrap(self.draft_num_tokens, 4)
-        max_q_len = max(8, draft_tokens + 1)
+        max_q_len = max(8, self.draft_window() + 1)
 
         finished = object()
 
@@ -1121,6 +1135,7 @@ class ExllamaV3Container:
                 self.equal_split_proportions,
                 margin_mb=self.equal_split_margin_mb,
                 max_chunk_size=self.chunk_size,
+                overhead_mb=self.equal_split_overhead_mb,
             )
             if tokens <= 0:
                 raise RuntimeError(
@@ -1152,6 +1167,7 @@ class ExllamaV3Container:
         if self.equal_split_proportions:
             split_kwargs["equal_split_proportions"] = self.equal_split_proportions
             split_kwargs["equal_split_margin_mb"] = self.equal_split_margin_mb
+            split_kwargs["equal_split_overhead_mb"] = self.equal_split_overhead_mb
 
         for value in self.model.load_gen(
             tensor_p=self.use_tp,
@@ -1227,14 +1243,7 @@ class ExllamaV3Container:
         Prompt chunk and draft-sized step at the far end of the cache; raises
         EqualSplitHeadroomError when a GPU keeps less than the margin
         """
-        # Same draft window the generator will use (DFlash defaults to its block size - 1)
-        draft_tokens = 0
-        if self.use_draft_model:
-            draft_tokens = unwrap(
-                self.draft_num_tokens, self.draft_model.caps.get("default_draft_size", 4)
-            )
-        elif self.ngram_match_min:
-            draft_tokens = unwrap(self.draft_num_tokens, 4)
+        draft_tokens = self.draft_window()
         # The target exports what the drafter reads (as the generator has it do)
         extra_params = None
         if self.use_draft_model:
