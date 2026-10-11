@@ -284,6 +284,38 @@ class ModelConfig(BaseConfigModel):
             "or draft_gpu_split."
         ),
     )
+    equal_split_proportions: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Equal split (exllamav3, layer split): one value per GPU (default: None).\n"
+            "Places the layers so every listed GPU keeps the same free VRAM, counting\n"
+            "weights, cache and peak working memory. Values are relative to the largest\n"
+            "(the largest may use all free VRAM, half of it at most half the card);\n"
+            "0 excludes a GPU. Replaces gpu_split_auto and autosplit_reserve."
+        ),
+    )
+    equal_split_margin_mb: Optional[int] = Field(
+        None,
+        description=(
+            "Free VRAM every GPU must keep with the equal split (default: 1024).\n"
+            "Checked against the memory measured when loading and by the stress test."
+        ),
+    )
+    equal_split_auto_context: Optional[bool] = Field(
+        None,
+        description=(
+            "Size the cache to the largest context the equal split can place with its\n"
+            "margin (default: False). max_seq_len, if set, is the upper bound.\n"
+            "Same as max_seq_len: auto in a model's tabby_config.yml."
+        ),
+    )
+    equal_split_stress_test: Optional[bool] = Field(
+        None,
+        description=(
+            "After loading with the equal split, run a prompt chunk and a decode step\n"
+            "at the end of the cache and check the margin (default: True)."
+        ),
+    )
     gpu_split: List[float] = Field(
         default_factory=list,
         description=(

@@ -150,6 +150,22 @@ model:
   # or draft_gpu_split.
   autosplit_reserve: [96]
 
+  # Equal split (layer split): one value per GPU, e.g. [1, 1, 1, 1] (default: none).
+  # Places the layers so every listed GPU keeps the same free VRAM, counting weights,
+  # cache and peak working memory. Values are relative to the largest; 0 excludes a GPU.
+  # Replaces gpu_split_auto and autosplit_reserve.
+  #equal_split_proportions: [1, 1]
+
+  # Free VRAM every GPU keeps with the equal split, in MB (default: 1024).
+  #equal_split_margin_mb: 1024
+
+  # Largest context the equal split can place with its margin (default: false).
+  # max_seq_len, if set, is the upper bound. Also: max_seq_len: auto in tabby_config.yml.
+  #equal_split_auto_context: false
+
+  # Stress test at the end of the cache after loading with the equal split (default: true).
+  #equal_split_stress_test: true
+
   # Array of VRAM sizes to split between GPUs, in GB (default: []).
   # Used both with and without tensor parallelism.
   gpu_split: []

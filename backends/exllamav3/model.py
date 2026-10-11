@@ -25,6 +25,7 @@ from exllamav3 import (
     Tokenizer,
 )
 from exllamav3.cache import CacheLayer_quant
+from exllamav3.model.model_equal_split import EqualSplitHeadroomError
 from backends.exllamav3.grammar import ExLlamaV3Grammar
 
 from backends.exllamav3.sampler import ExllamaV3SamplerBuilder
@@ -190,6 +191,9 @@ class ExllamaV3Container:
     gpu_split_auto: bool = True
     draft_gpu_split: Optional[List[float]] = None
     equal_split_proportions: Optional[List[float]] = None
+    equal_split_margin_mb: int = 1024
+    equal_split_auto_context: bool = False
+    equal_split_stress_test: bool = True
     autosplit_reserve: Optional[List[float]]
     use_tp: bool = False
     tp_backend: str = "native"
@@ -428,6 +432,29 @@ class ExllamaV3Container:
                         for device_idx, share in enumerate(equal_split_proportions)
                         if share > 0
                     ]
+                    self.equal_split_margin_mb = unwrap(
+                        kwargs.get("equal_split_margin_mb"), 1024
+                    )
+                    self.equal_split_stress_test = unwrap(
+                        kwargs.get("equal_split_stress_test"), True
+                    )
+
+        # Automatic context: the largest cache the equal split can place with its
+        # margin. Requested with max_seq_len/cache_size "auto" or
+        # equal_split_auto_context; a numeric max_seq_len is then the upper bound
+        auto_context = (
+            kwargs.get("max_seq_len") == "auto"
+            or kwargs.get("cache_size") == "auto"
+            or bool(kwargs.get("equal_split_auto_context"))
+        )
+        if auto_context:
+            if self.equal_split_proportions:
+                self.equal_split_auto_context = True
+            else:
+                xlogger.warning(
+                    "Automatic context needs equal_split_proportions; "
+                    "using the model's default context instead."
+                )
 
         # A manual split states how much of each GPU to use, and exllamav3 takes
         # either a reserve or a split, so the reserve is dropped for that model
@@ -457,6 +484,8 @@ class ExllamaV3Container:
 
         # Determine max_seq_len and cache_size
         max_seq_len_user = kwargs.get("max_seq_len")
+        if max_seq_len_user == "auto":
+            max_seq_len_user = None
         max_seq_len_model = self.hf_model.hf_config.get_max_position_embeddings(default=None)
         max_seq_len_default = 8192
 
@@ -474,10 +503,15 @@ class ExllamaV3Container:
             max_seq_len_source = "fallback"
 
         cache_size_user = kwargs.get("cache_size")
+        if cache_size_user == "auto" or self.equal_split_auto_context:
+            cache_size_user = None
         cache_size_default = max_seq_len
 
         if cache_size_user:
             cache_size = cache_size_user
+        elif self.equal_split_auto_context:
+            # Upper bound for the automatic context, resolved when loading
+            cache_size = -(-max_seq_len // PAGE_SIZE) * PAGE_SIZE
         else:
             xlogger.warning(
                 f"cache_size is undefined. Defaulting to {cache_size_default} tokens. "
@@ -921,15 +955,37 @@ class ExllamaV3Container:
             await self.wait_for_jobs(kwargs.get("skip_wait"))
 
             load_start = time.perf_counter()
-            generator = self.load_model_sync(progress_callback)
-            async for value in iterate_in_threadpool(generator):
-                yield value
+            attempt = 0
+            while True:
+                try:
+                    generator = self.load_model_sync(progress_callback)
+                    async for value in iterate_in_threadpool(generator):
+                        yield value
 
-            # Warm up before the generator attaches to the cache: the passes
-            # write into its leading pages and borrow recurrent-state slots
-            if self.warmup_enabled:
-                async for value in self.warmup_gen():
-                    yield value
+                    # Warm up before the generator attaches to the cache: the passes
+                    # write into its leading pages and borrow recurrent-state slots
+                    if self.warmup_enabled:
+                        async for value in self.warmup_gen():
+                            yield value
+
+                    # Worst case at the end of the cache, after warmup has allocated
+                    # its static workspaces and before the generator attaches
+                    if self.equal_split_proportions and self.equal_split_stress_test:
+                        await asyncio.to_thread(self.equal_split_stress_sync)
+                    break
+
+                except EqualSplitHeadroomError as e:
+                    # With an automatic context, drop enough context to clear the
+                    # deficit and load again. A fixed context is the user's call
+                    attempt += 1
+                    if not self.equal_split_auto_context or attempt >= 3:
+                        raise
+                    new_size = e.suggested_context(self.cache_size)
+                    xlogger.warning(
+                        f"Equal split: {str(e).splitlines()[0]}. Reloading with "
+                        f"{new_size:,} tokens of context instead of {self.cache_size:,}."
+                    )
+                    await asyncio.to_thread(self.equal_split_reset_sync, new_size)
 
             # Create async generator
             await self.create_generator()
@@ -1042,6 +1098,24 @@ class ExllamaV3Container:
                 if value:
                     yield value
 
+        # Automatic context: size the cache from the VRAM left after the draft
+        if self.equal_split_auto_context:
+            tokens = self.model.equal_split_max_context(
+                self.cache,
+                self.equal_split_proportions,
+                margin_mb=self.equal_split_margin_mb,
+                max_chunk_size=self.chunk_size,
+            )
+            if tokens <= 0:
+                raise RuntimeError(
+                    "Equal split: the model does not fit with "
+                    f"{self.equal_split_margin_mb} MB free on every GPU, even at the "
+                    "smallest context."
+                )
+            if tokens < self.cache_size:
+                yield from self.equal_split_resize_sync(tokens, progress_callback)
+            xlogger.info(f"Equal split: automatic context {self.cache_size:,} tokens")
+
         # Without a manual split the engine autosplits with the reserve, over
         # however many devices are visible
         if self.use_tp:
@@ -1061,6 +1135,7 @@ class ExllamaV3Container:
         split_kwargs = {}
         if self.equal_split_proportions:
             split_kwargs["equal_split_proportions"] = self.equal_split_proportions
+            split_kwargs["equal_split_margin_mb"] = self.equal_split_margin_mb
 
         for value in self.model.load_gen(
             tensor_p=self.use_tp,
@@ -1076,6 +1151,70 @@ class ExllamaV3Container:
         ):
             if value:
                 yield value
+
+    def _equal_split_new_caches(self, cache_size: int):
+        """Replace the caches with ones of the given size (nothing loaded uses them)"""
+        self.cache.detach_from_model()
+        self.cache_size = cache_size
+        self.max_seq_len = min(self.max_seq_len, cache_size)
+        self.cache = self.create_cache(self.cache_mode, self.model)
+        if self.use_draft_model:
+            self.draft_cache.detach_from_model()
+            self.draft_cache = self.create_cache(self.draft_cache_mode, self.draft_model)
+        self.max_rq_tokens = self.chunk_size if self.max_rq_tokens else None
+
+    def equal_split_resize_sync(self, cache_size: int, progress_callback=None):
+        """
+        Shrink the context before the main model loads. The draft model's cache
+        was allocated with the old size, so the draft is loaded again with the
+        new one.
+        """
+        if self.use_draft_model:
+            self.draft_model.unload()
+        gc.collect()
+        torch.cuda.empty_cache()
+        self._equal_split_new_caches(cache_size)
+        if self.use_draft_model:
+            for value in self.draft_model.load_gen(
+                reserve_per_device=(
+                    None if (self.gpu_split or self.draft_gpu_split) else self.autosplit_reserve
+                ),
+                use_per_device=self.draft_gpu_split or None,
+                callback=progress_callback,
+            ):
+                if value:
+                    yield value
+
+    def equal_split_reset_sync(self, cache_size: int):
+        """Unload everything after a failed headroom check and size the caches anew"""
+        self.model.unload()
+        if self.use_draft_model:
+            self.draft_model.unload()
+        if self.use_vision:
+            self.vision_model.unload()
+        gc.collect()
+        torch.cuda.empty_cache()
+        self._equal_split_new_caches(cache_size)
+
+    @torch.inference_mode()
+    def equal_split_stress_sync(self):
+        """
+        Prompt chunk and draft-sized step at the far end of the cache; raises
+        EqualSplitHeadroomError when a GPU keeps less than the margin
+        """
+        draft_tokens = 0
+        if self.use_draft_model or self.ngram_match_min:
+            draft_tokens = unwrap(self.draft_num_tokens, 4)
+        # The target exports what the drafter reads (as the generator has it do)
+        extra_params = None
+        if self.use_draft_model:
+            extra_params = dict(self.draft_model.draft_verifier_params)
+        self.model.equal_split_stress_test(
+            cache=self.cache,
+            max_chunk_size=self.chunk_size,
+            max_q_len=draft_tokens + 1,
+            extra_params=extra_params,
+        )
 
     async def create_generator(self):
         """
