@@ -1218,8 +1218,13 @@ class ExllamaV3Container:
         Prompt chunk and draft-sized step at the far end of the cache; raises
         EqualSplitHeadroomError when a GPU keeps less than the margin
         """
+        # Same draft window the generator will use (DFlash defaults to its block size - 1)
         draft_tokens = 0
-        if self.use_draft_model or self.ngram_match_min:
+        if self.use_draft_model:
+            draft_tokens = unwrap(
+                self.draft_num_tokens, self.draft_model.caps.get("default_draft_size", 4)
+            )
+        elif self.ngram_match_min:
             draft_tokens = unwrap(self.draft_num_tokens, 4)
         # The target exports what the drafter reads (as the generator has it do)
         extra_params = None
