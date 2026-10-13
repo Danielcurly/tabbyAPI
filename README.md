@@ -22,6 +22,52 @@
     </a>
 </p>
 
+> [!NOTE]
+> **This is a fork of [theroyallab/tabbyAPI](https://github.com/theroyallab/tabbyAPI)** that exposes **equal autosplit** for ExLlamaV3 models. Everything else is upstream TabbyAPI. The feature lives on the [`equal-autosplit`](https://github.com/Danielcurly/tabbyAPI/tree/equal-autosplit) branch and **requires the ExLlamaV3 fork [Danielcurly/exllamav3](https://github.com/Danielcurly/exllamav3), branch [`equal-autosplit-v1.6`](https://github.com/Danielcurly/exllamav3/tree/equal-autosplit-v1.6)**. That fork explains how the split is computed. The rest of this README is the upstream one.
+
+## Equal autosplit (this fork)
+
+With several GPUs, the stock `gpu_split_auto` + `autosplit_reserve` fills one card after another. The first cards end up full and the last ones half empty. The reserve doesn't count the transient memory of long prompts either, so a model that loads fine can still run out of memory on its first long request. Finding a `gpu_split` and a `max_seq_len` that work takes trial and error, and you have to do it again for every model.
+
+This fork adds config options that hand the layer placement to ExLlamaV3's equal autosplit. Every GPU then keeps the same free VRAM, the context can be sized automatically, and the result is checked at load time.
+
+| Option (`model:` section) | Default | Meaning |
+|---|---|---|
+| `equal_split_proportions` | none | One value per visible GPU, relative to the largest. `[1, 1, 1, 1]` gives every GPU the same free VRAM; a lower value keeps a GPU partly free; `0` excludes it. Replaces `gpu_split_auto`, `autosplit_reserve` and `gpu_split`. Layer split only (not tensor parallel). |
+| `equal_split_margin_mb` | `1024` | Free VRAM, in MB, that every GPU must keep. One number applies to all GPUs; a list sets one value per GPU. |
+| `equal_split_overhead_mb` | `192` | Runtime overhead per GPU, in MB, added to the estimate (load buffers, kernels and workspaces after warmup). One number or one per GPU. |
+| `equal_split_auto_context` | `false` | Use the largest context that fits with the margin on every GPU. A numeric `max_seq_len` becomes the upper bound. In a model's `tabby_config.yml`, `max_seq_len: auto` / `cache_size: auto` does the same. |
+| `equal_split_stress_test` | `true` | After loading, run a full prompt chunk and a decode step at the end of the cache, using the draft model's real window if there is one, and check the margin on every GPU. |
+
+How loading behaves:
+
+- **Draft model first.** The draft model (DFlash, MTP or a separate draft) is loaded before the main model. The split and the automatic context then account for the VRAM it already takes.
+- **Automatic retry.** If a GPU would end up below its margin, ExLlamaV3 raises `EqualSplitHeadroomError` with the deficit per GPU. With an automatic context, TabbyAPI shrinks the context by the suggested amount, rebuilds the caches (and reloads the draft model) and loads again, up to 3 attempts. With a fixed context, it fails with a clear error at load time instead of failing later during a request.
+- **Readable logs.** The plan, the after-load comparison (estimated vs measured memory) and the stress test results are printed as per-GPU tables. On a retry the progress bars restart from the right component. A missing GPU (more proportions than visible devices) produces a clear error.
+
+### Example
+
+`config.yml`. This is what a 7-GPU rig runs for Qwen3.6-27B (8.0 bpw) with an MTP draft:
+
+```yaml
+model:
+  equal_split_proportions: [1, 1, 1, 1, 1, 1, 1]  # one per visible GPU
+  equal_split_margin_mb: 1024                     # or a list, e.g. [1536, 1024, 1024, 1024, 1024, 1024, 1024]
+  equal_split_stress_test: true
+  equal_split_auto_context: true                  # largest context that fits (244k tokens here)
+  cache_mode: '8,8'
+  chunk_size: 2048
+  max_batch_size: 1
+
+draft_model:
+  draft_mode: mtp
+  draft_num_tokens: 4
+```
+
+Install the ExLlamaV3 fork in TabbyAPI's environment (for example `pip install git+https://github.com/Danielcurly/exllamav3@equal-autosplit-v1.6`; it builds the extension and needs the CUDA toolkit). Then start TabbyAPI as usual.
+
+---
+
 > [!IMPORTANT]
 >
 > In addition to the README, please read the [Wiki](https://github.com/theroyallab/tabbyAPI/wiki/1.-Getting-Started) page for information about getting started!
